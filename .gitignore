@@ -4,21 +4,9 @@
 *.pcapng
 *.cap
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.venv/
-venv/
-.env
-.env.*
-.pytest_cache/
-
 # Logs
 logs/
 *.log
-.coverage
 
 # VSCode/Cursor
 .vscode/
@@ -33,10 +21,5 @@ Thumbs.db
 *.clixml
 PowerShell_transcript*
 
-# Coverage reports
-coverage.xml
-pester-coverage.xml
-.coverage
-htmlcov/
-
 temporary/
+Videos/

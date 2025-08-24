@@ -1,15 +1,35 @@
 #requires -Version 5.1
+
+#region Configuration Loading
+$ConfigPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Config.ini'
+$Config = @{}
+if (Test-Path -LiteralPath $ConfigPath) {
+    try {
+        Get-Content -LiteralPath $ConfigPath | ForEach-Object {
+            if ($_ -match '^\s*([^#;].*?)\s*=\s*(.*)') {
+                $key = $Matches[1].Trim()
+                $value = $Matches[2].Trim()
+                $Config[$key] = $value
+            }
+        }
+    } catch {
+        Write-Warning ("Failed to read or parse Config.ini: {0}" -f $_.Exception.Message)
+    }
+}
+#endregion
+
 param(
 	# * Path to Seelock Connect LTE executable
-	[string]$ExePath = "C:\Program Files\Seelock Connect LTE\SeelockConnectLTE.exe",
+	[string]$ExePath,
 	# * Password for the device (will not be logged)
-	[string]$Password = "",
+	[Parameter(Mandatory = $false)]
+	[string]$Password,
 	# * Max time to wait for windows/controls (seconds)
-	[int]$UiTimeoutSec = 1,
+	[int]$UiTimeoutSec,
 	# * Max time to wait for new USB drive to appear (seconds)
-	[int]$DriveTimeoutSec = 1,
+	[int]$DriveTimeoutSec,
 	# * Close the application when done
-	[switch]$CloseApp = $true,
+	[switch]$CloseApp,
 	# * If true, attempt reattach even if drive seems already mounted
 	[switch]$ForceReattach,
 	# * Folder names that indicate Seelock mass storage already mounted
@@ -18,9 +38,29 @@ param(
 	[switch]$VerboseLog
 )
 
+#region Parameter Resolution
+# * Precedence: Command-line > Config.ini > Hardcoded Default
+if (-not $PSBoundParameters.ContainsKey('ExePath')) {
+    $ExePath = if ($Config.ContainsKey('ExePath')) { $Config.ExePath } else { 'C:\Program Files\Seelock Connect LTE\SeelockConnectLTE.exe' }
+}
+if (-not $PSBoundParameters.ContainsKey('Password')) {
+    $Password = if ($Config.ContainsKey('Password')) { $Config.Password } else { '000000' }
+}
+#endregion
+
+#region Defaults for optional parameters
+if (-not $PSBoundParameters.ContainsKey('UiTimeoutSec')) { $UiTimeoutSec = 5 }
+if (-not $PSBoundParameters.ContainsKey('DriveTimeoutSec')) { $DriveTimeoutSec = 10 }
+if (-not $PSBoundParameters.ContainsKey('CloseApp')) { $CloseApp = $true }
+if (-not $PSBoundParameters.ContainsKey('VerboseLog')) { $VerboseLog = $true }
+#endregion
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$operationSucceeded = $false
+$script:proc = $null
+
+# * Global modal timeout used across all modal handlers (seconds)
+$Global:ModalTimeoutSec = 1
 
 function Write-Info {
 	param([string]$Message)
@@ -85,7 +125,7 @@ function Get-SeelockProcesses {
 }
 
 function Close-SeelockGracefully {
-	param([int]$TimeoutSec = 10)
+	param([int]$TimeoutSec = 1)
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
 	$attemptedClose = $false
 	while ((Get-Date) -lt $deadline) {
@@ -97,8 +137,7 @@ function Close-SeelockGracefully {
 			try {
 				$wins = @()
 				foreach ($p in $procs) { $wins += (Get-TopLevelWindowsByProcessId -ProcessId $p.Id) }
-				for ($w = 0; $w -lt $wins.Count; $w++) {
-					$wEl = $wins[$w]
+				foreach ($wEl in @($wins)) {
 					$ok = Find-OkButton -Root $wEl -TimeoutSec 1
 					if ($ok) { Invoke-ElementClick -Element $ok }
 				}
@@ -164,7 +203,7 @@ function Find-DescendantButtonByNames {
 		$btns = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $typeCond)
 		for ($i = 0; $i -lt $btns.Count; $i++) {
 			$name = $btns.Item($i).Current.Name
-			if ($name -and ($name -match 'USB' -or $name -match 'диск' -or $name -match 'Disk')) { return $btns.Item($i) }
+			if ($name -and ($name -match 'USB' -or $name -match 'диск' -or $name -match 'Disk' -or $name -match 'MSDC' -or $name -match 'Mass Storage')) { return $btns.Item($i) }
 		}
 		Start-Sleep -Milliseconds 200
 	}
@@ -176,12 +215,11 @@ function Find-UsbButtonAcrossWindows {
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
 	while ((Get-Date) -lt $deadline) {
 		$wins = Get-TopLevelWindowsByProcessId -ProcessId $ProcessId
-		for ($w = 0; $w -lt $wins.Count; $w++) {
-			$wEl = $wins[$w]
-			$btn = Find-DescendantButtonByNames -Root $wEl -Names @('USB диск','USB Disk','Подключить USB диск','Connect USB Disk') -TimeoutSec 1
+		foreach ($wEl in @($wins)) {
+			$btn = Find-DescendantButtonByNames -Root $wEl -Names @('USB диск','USB Disk','Подключить USB диск','Connect USB Disk','MSDC') -TimeoutSec 1
 			if ($btn) { return $btn }
 		}
-		Start-Sleep -Milliseconds 200
+		Start-Sleep -Milliseconds 100
 	}
 	return $null
 }
@@ -199,9 +237,20 @@ function Find-OkButton {
 			$name = $btns.Item($i).Current.Name
 			if ($name -and ($names | Where-Object { $name -like "$_*" }).Count -gt 0) { return $btns.Item($i) }
 		}
-		Start-Sleep -Milliseconds 200
+		Start-Sleep -Milliseconds 100
 	}
 	return $null
+}
+
+function Invoke-FastOkSweep {
+	param([int]$ProcessId)
+	try {
+		$wins = Get-TopLevelWindowsByProcessId -ProcessId $ProcessId
+		foreach ($wEl in @($wins)) {
+			$ok = Find-OkButton -Root $wEl -TimeoutSec $Global:ModalTimeoutSec
+			if ($ok) { Invoke-ElementClick -Element $ok }
+		}
+	} catch { Write-Info ("Fast OK sweep: {0}" -f $_.Exception.Message) }
 }
 
 function Wait-CloseSuccessLoginModal {
@@ -210,10 +259,14 @@ function Wait-CloseSuccessLoginModal {
 	$ae = [System.Windows.Automation.AutomationElement]
 	$textType = [System.Windows.Automation.ControlType]::Text
 	$textCond = New-Object System.Windows.Automation.PropertyCondition($ae::ControlTypeProperty, $textType)
+	$logCounter = 0
 	while ((Get-Date) -lt $deadline) {
+		if ($logCounter % 5 -eq 0) { # Log every 500ms
+			Write-Info "Waiting for success modal to close..."
+		}
+		$logCounter++
 		$wins = Get-TopLevelWindowsByProcessId -ProcessId $ProcessId
-		for ($w = 0; $w -lt $wins.Count; $w++) {
-			$wEl = $wins[$w]
+		foreach ($wEl in @($wins)) {
 			$name = $wEl.Current.Name
 			$hit = $false
 			if ($name -and ($name -match 'Успеш' -or $name -match 'Success' -or $name -match 'Выполнено' -or $name -match 'Удачно')) { $hit = $true }
@@ -228,11 +281,11 @@ function Wait-CloseSuccessLoginModal {
 				} catch { Write-Info ("Success modal scan: {0}" -f $_.Exception.Message) }
 			}
 			if ($hit) {
-				$ok = Find-OkButton -Root $wEl -TimeoutSec 2
+				$ok = Find-OkButton -Root $wEl -TimeoutSec $Global:ModalTimeoutSec
 				if ($ok) { Invoke-ElementClick -Element $ok; return $true }
 			}
 		}
-		Start-Sleep -Milliseconds 200
+		Start-Sleep -Milliseconds 100
 	}
 	return $false
 }
@@ -256,10 +309,14 @@ function Get-WindowTextContents {
 function Wait-CloseConnectionErrorModal {
 	param([int]$ProcessId, [int]$TimeoutSec)
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
+	$logCounter = 0
 	while ((Get-Date) -lt $deadline) {
+		if ($logCounter % 5 -eq 0) { # Log every 500ms
+			Write-Info "Waiting for connection error modal..."
+		}
+		$logCounter++
 		$wins = Get-TopLevelWindowsByProcessId -ProcessId $ProcessId
-		for ($w = 0; $w -lt $wins.Count; $w++) {
-			$wEl = $wins[$w]
+		foreach ($wEl in @($wins)) {
 			$name = $wEl.Current.Name
 			$allText = (Get-WindowTextContents -Root $wEl)
 			$hay = (($name + ' ' + $allText) -as [string])
@@ -269,12 +326,12 @@ function Wait-CloseConnectionErrorModal {
 				if ($hay -match 'уже' -and $hay -match 'подключ') { $reason = 'AlreadyConnected' }
 				elseif ($hay -match 'парол' -or $hay -match 'password') { $reason = 'AuthFailed' }
 				# * Close modal
-				$ok = Find-OkButton -Root $wEl -TimeoutSec 2
+				$ok = Find-OkButton -Root $wEl -TimeoutSec $Global:ModalTimeoutSec
 				if ($ok) { Invoke-ElementClick -Element $ok }
 				return $reason
 			}
 		}
-		Start-Sleep -Milliseconds 150
+		Start-Sleep -Milliseconds 100
 	}
 	return $null
 }
@@ -374,121 +431,151 @@ function Set-EditValue {
 }
 
 try {
-	Throw-If -Condition (-not (Test-Path -LiteralPath $ExePath)) -Message ("Executable not found: {0}" -f $ExePath)
-	Throw-If -Condition ([string]::IsNullOrWhiteSpace($Password)) -Message "Password is required. Pass -Password 'YOUR_PASSWORD'"
+    $currentPassword = $Password
+    $retryCount = 0
+    $maxRetries = 3
+    $operationSucceeded = $false
 
-	# * Short-circuit if already mounted and not forcing reattach
-	$existing = $null
-	if (-not $ForceReattach) {
-		$existing = Test-SeelockDrivePresent -Indicators $ExistingDriveIndicators
-		if ($existing) {
-			Write-Output ("DriveReady={0}" -f $existing)
-			$operationSucceeded = $true
-			return
-		}
-	}
+    do {
+        $authFailed = $false
+        try {
+            Throw-If -Condition (-not (Test-Path -LiteralPath $ExePath)) -Message ("Executable not found: {0}" -f $ExePath)
+            if ([string]::IsNullOrWhiteSpace($currentPassword)) {
+                # This will be caught and will trigger the password prompt
+                throw "AuthFailed: Password is required."
+            }
 
-	Write-Info ("Launching: {0}" -f $ExePath)
-	$drivesBefore = Get-ExistingDrives
-	$proc = Start-Process -FilePath $ExePath -PassThru
-	$proc.EnableRaisingEvents = $true
+            # * Short-circuit if already mounted and not forcing reattach
+            $existing = $null
+            if (-not $ForceReattach) {
+                $existing = Test-SeelockDrivePresent -Indicators $ExistingDriveIndicators
+                if ($existing) {
+                    Write-Output ("DriveReady={0}" -f $existing)
+                    $operationSucceeded = $true
+                    # Break the do-while loop
+                    break
+                }
+            }
 
-	Import-UIAutomationAssemblies
-	$mainWindow = Find-TopLevelWindowByProcessId -ProcessId $proc.Id -TimeoutSec $UiTimeoutSec
-	Throw-If -Condition (-not $mainWindow) -Message "Main window not found within timeout"
-	try { $mainWindow.SetFocus() } catch { }
+            Write-Info ("Launching: {0}" -f $ExePath)
+            $drivesBefore = Get-ExistingDrives
+            $proc = Start-Process -FilePath $ExePath -PassThru
+            $proc.EnableRaisingEvents = $true
+            $script:proc = $proc
 
-	Write-Info "Clicking 'Connect/Подключение' button"
-	$connectBtn = Find-DescendantButtonByNames -Root $mainWindow -Names @('Подключение','Connect','Connection') -TimeoutSec $UiTimeoutSec
-	Throw-If -Condition (-not $connectBtn) -Message "Connect button not found"
-	Invoke-ElementClick -Element $connectBtn
-	Start-Sleep -Milliseconds 300
+            Import-UIAutomationAssemblies
+            $mainWindow = Find-TopLevelWindowByProcessId -ProcessId $proc.Id -TimeoutSec $UiTimeoutSec
+            Throw-If -Condition (-not $mainWindow) -Message "Main window not found within timeout"
+            try { $mainWindow.SetFocus() } catch { }
 
-	Write-Info "Entering password"
-	$pwdEdit = Find-DescendantEditForPassword -Root $mainWindow -TimeoutSec $UiTimeoutSec
-	Throw-If -Condition (-not $pwdEdit) -Message "Password field not found"
-	Set-EditValue -Edit $pwdEdit -Text $Password
-	Start-Sleep -Milliseconds 300
+            Write-Info "Clicking 'Connect/Подключение' button"
+            $connectBtn = Find-DescendantButtonByNames -Root $mainWindow -Names @('Подключение','Connect','Connection') -TimeoutSec $UiTimeoutSec
+            Throw-If -Condition (-not $connectBtn) -Message "Connect button not found"
+            Invoke-ElementClick -Element $connectBtn
+            Start-Sleep -Seconds $Global:ModalTimeoutSec
 
-	Write-Info "Clicking 'Login/Логин' button"
-	$loginBtn = Find-DescendantButtonByNames -Root $mainWindow -Names @('Логин','Login') -TimeoutSec $UiTimeoutSec
-	Throw-If -Condition (-not $loginBtn) -Message "Login button not found"
-	Invoke-ElementClick -Element $loginBtn
+            Write-Info "Entering password"
+            $pwdEdit = Find-DescendantEditForPassword -Root $mainWindow -TimeoutSec $UiTimeoutSec
+            Throw-If -Condition (-not $pwdEdit) -Message "Password field not found"
+            Set-EditValue -Edit $pwdEdit -Text $currentPassword
+            Start-Sleep -Seconds $Global:ModalTimeoutSec
 
-	# * Close success login modal if present, then wait for USB button or error
-	[void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec 5)
+            Write-Info "Clicking 'Login/Логин' button"
+            $loginBtn = Find-DescendantButtonByNames -Root $mainWindow -Names @('Логин','Login') -TimeoutSec $UiTimeoutSec
+            Throw-If -Condition (-not $loginBtn) -Message "Login button not found"
+            Invoke-ElementClick -Element $loginBtn
 
-	# * Wait for either USB button or error modal
-	$deadlineLogin = (Get-Date).AddSeconds($UiTimeoutSec)
-	$usbBtn = $null
-	while ((Get-Date) -lt $deadlineLogin) {
-		if ($proc.HasExited) { throw "Application exited unexpectedly after login" }
-		$usbBtn = Find-UsbButtonAcrossWindows -ProcessId $proc.Id -TimeoutSec 1
-		if ($usbBtn) { break }
-		# * Look for error modal under same process
-		$wins = Get-TopLevelWindowsByProcessId -ProcessId $proc.Id
-		for ($w = 0; $w -lt $wins.Count; $w++) {
-			$wEl = $wins.Item($w)
-			$name = $wEl.Current.Name
-			if ($name -and ($name -match 'Ошибка' -or $name -match 'Error' -or $name -match 'Неверный')) {
-				throw ("Login error dialog detected: {0}" -f $name)
-			}
-			# * Also close any success modal encountered mid-wait
-			[void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec 1)
-		}
-		Start-Sleep -Milliseconds 200
-	}
-	if (-not $usbBtn) {
-		# * If USB button not visible, check for connection-required modal and close it
-		$errReason = Wait-CloseConnectionErrorModal -ProcessId $proc.Id -TimeoutSec 2
-		if ($errReason) { throw ("USB button not available after login ({0})" -f $errReason) }
-		throw "USB Disk button not found after login"
-	}
-	Write-Info "Clicking '(подключить) USB диск'"
-	Invoke-ElementClick -Element $usbBtn
-	# * Handle success modal that appears after USB connect
-	Start-Sleep -Milliseconds 300
-	[void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec 5)
+            # * Close any success login modal quickly
+            [void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec)
+            Invoke-FastOkSweep -ProcessId $proc.Id
 
-	Write-Info "Waiting for new USB drive to appear"
-	$newDrive = Wait-ForNewDrive -Before $drivesBefore -TimeoutSec $DriveTimeoutSec
-	if (-not $newDrive) {
-		# * Check for connection error modal and close it for a clean end
-		$errReason = Wait-CloseConnectionErrorModal -ProcessId $proc.Id -TimeoutSec 2
-		if ($errReason) {
-			throw ("USB connect failed ({0})" -f $errReason)
-		}
-		throw "No new drive detected within $DriveTimeoutSec seconds"
-	}
+            # * Wait for either USB button or error modal
+            $deadlineLogin = (Get-Date).AddSeconds($UiTimeoutSec)
+            $usbBtn = $null
+            while ((Get-Date) -lt $deadlineLogin) {
+                if ($proc.HasExited) { throw "Application exited unexpectedly after login" }
+                $usbBtn = Find-UsbButtonAcrossWindows -ProcessId $proc.Id -TimeoutSec 1
+                if ($usbBtn) { break }
+                # * Look for error modal under same process and close success ones fast
+                Invoke-FastOkSweep -ProcessId $proc.Id
+                $wins = Get-TopLevelWindowsByProcessId -ProcessId $proc.Id
+                foreach ($wEl in @($wins)) {
+                    $name = $wEl.Current.Name
+                    if ($name -and ($name -match 'Ошибка' -or $name -match 'Error' -or $name -match 'Неверный')) {
+                        throw ("Login error dialog detected: {0}" -f $name)
+                    }
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not $usbBtn) {
+                # * If USB button not visible, check for connection-required modal and close it
+                $errReason = Wait-CloseConnectionErrorModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec
+                if ($errReason) {
+                    throw ("USB button not available after login ({0})" -f $errReason)
+                }
+                # Sweep any leftover success modals quickly
+                Invoke-FastOkSweep -ProcessId $proc.Id
+                throw "USB Disk button not found after login"
+            }
+            Write-Info "Clicking '(подключить) USB диск'"
+            Invoke-ElementClick -Element $usbBtn
+            # * Handle success modal that appears after USB connect
+            Start-Sleep -Seconds $Global:ModalTimeoutSec
+            [void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec)
+            Invoke-FastOkSweep -ProcessId $proc.Id
 
-	Write-Output ("DriveReady={0}" -f $newDrive)
-	$operationSucceeded = $true
-	
-	if ($CloseApp) {
-		Write-Info "Closing application"
-		$grace = Close-SeelockGracefully -TimeoutSec 10
-		if (-not $grace) {
-			Write-Info "Force killing Seelock processes"
-			Kill-SeelockForce
-		}
-	}
+            Write-Info "Waiting for new USB drive to appear"
+            $newDrive = Wait-ForNewDrive -Before $drivesBefore -TimeoutSec $DriveTimeoutSec
+            if (-not $newDrive) {
+                # * Check for connection error modal and close it for a clean end
+                $errReason = Wait-CloseConnectionErrorModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec
+                if ($errReason) {
+                    throw ("USB connect failed ({0})" -f $errReason)
+                }
+                # Sweep any leftover success modals quickly
+                Invoke-FastOkSweep -ProcessId $proc.Id
+                throw "No new drive detected within $DriveTimeoutSec seconds"
+            }
+
+            Write-Output ("DriveReady={0}" -f $newDrive)
+            $operationSucceeded = $true
+        }
+        catch {
+            $msg = $_.Exception.Message
+            if (($msg -match 'AuthFailed' -or $msg -match 'Login error dialog detected') -and $retryCount -lt $maxRetries) {
+                $authFailed = $true
+                $retryCount++
+                Write-Warning "Authentication failed. Please try again."
+                $currentPassword = Read-Host -Prompt "Enter password for Seelock device"
+            } else {
+                # Rethrow the exception to be caught by the outer catch block
+                throw $_
+            }
+        }
+    } while ($authFailed)
+
+    if (-not $operationSucceeded) {
+        throw "Operation did not complete successfully after all retries."
+    }
+
 }
 catch {
+    $msg = $_.Exception.Message
 	# ! Handle errors gracefully. If core operation succeeded, do not print as error; just clean up and exit 0
-	$msg = $_.Exception.Message
 	if ($operationSucceeded) {
 		Write-Info ("Cleanup after success: {0}" -f $msg)
-		try { if ($CloseApp) { $null = Close-SeelockGracefully -TimeoutSec 2; Kill-SeelockForce } } catch { }
-		exit 0
 	} else {
 		Write-Error ("Automation failed: {0}" -f $msg)
-		try { if ($proc -and -not $proc.HasExited -and $CloseApp) { $null = Close-SeelockGracefully -TimeoutSec 2; Kill-SeelockForce } } catch { }
 		exit 1
 	}
 }
 finally {
 	# * Ensure app is terminated even if unhandled runtime errors occur
-	try { if ($CloseApp) { $null = Close-SeelockGracefully -TimeoutSec 2; Kill-SeelockForce } } catch { }
+	if ($script:proc -and -not $script:proc.HasExited -and $CloseApp) {
+		Write-Info "Ensuring application is closed..."
+		$null = Close-SeelockGracefully -TimeoutSec $Global:ModalTimeoutSec
+		Kill-SeelockForce
+	}
 }
 
 
