@@ -1,3 +1,39 @@
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# IDE / Editor
+.vscode/
+.idea/
+*.code-workspace
+.cursor/
+
+# PowerShell artifacts
+*.ps1xml
+*.pssc
+*.psd1
+
+# Logs & temp
+logs/
+*.log
+*.tmp
+*.temp
+*.bak
+*.old
+
+# Project outputs
+Videos/
+temporary/
+*.zip
+
+# Local config
+Language.ini
+seelock.ico
+
+# OS X
+.DS_Store
 # Data captures and binaries
 /data/
 *.pcap
