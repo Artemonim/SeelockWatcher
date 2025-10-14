@@ -77,6 +77,50 @@ function Get-VideoDuration {
     }
 }
 
+# * Returns codec name of the first video stream using ffprobe (e.g., 'h264', 'hevc').
+function Get-VideoCodecName {
+    param([string]$FilePath)
+    try {
+        $ffprobePath = (Get-Command ffprobe.exe -ErrorAction Stop).Source
+        $arguments = @(
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $FilePath
+        )
+        $codec = (& $ffprobePath @arguments | Out-String -Stream).Trim().ToLowerInvariant()
+        return $codec
+    } catch {
+        return ''
+    }
+}
+
+# * Chooses a hardware decoder based on input codec and available decoders.
+# * Preference order per codec: NVDEC (cuvid) -> QSV -> none.
+function Get-DecoderArgsForCodec {
+    param(
+        [string]$CodecName,
+        [string]$DecodersText
+    )
+    if (-not $CodecName) { return @() }
+
+    $isH264 = ($CodecName -eq 'h264' -or $CodecName -eq 'avc')
+    $isHevc = ($CodecName -eq 'hevc' -or $CodecName -eq 'h265')
+
+    if ($isH264) {
+        if ($DecodersText -match 'h264_cuvid') { return @('-c:v', 'h264_cuvid') }
+        if ($DecodersText -match 'h264_qsv') { return @('-c:v', 'h264_qsv') }
+        return @()
+    }
+    if ($isHevc) {
+        if ($DecodersText -match 'hevc_cuvid') { return @('-c:v', 'hevc_cuvid') }
+        if ($DecodersText -match 'hevc_qsv') { return @('-c:v', 'hevc_qsv') }
+        return @()
+    }
+    return @()
+}
+
 function Write-Summary {
     param(
         [hashtable]$Stats,
@@ -251,15 +295,34 @@ function Convert-Videos {
     $codecInfo = Get-BestFfmpegVideoCodec
     Write-Host ($Strings.Convert_UsingEncoder -f $codecInfo.Encoder)
 
+    # * Query available decoders once to drive input-aware selection per file
+    $ffmpegPath = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+    $availableDecodersText = (& $ffmpegPath -decoders 2>&1)
+
     # --- ETA Calculation Setup ---
     Write-Host $Strings.Convert_CalcWorkload
     $totalDurationSec = 0
+    # * Collect per-file durations to enable better ETA when files are uniform in length
+    $fileDurations = New-Object System.Collections.Generic.List[double]
     foreach ($file in $filesToConvert) {
-        $totalDurationSec += Get-VideoDuration -FilePath $file.FullName
+        $d = Get-VideoDuration -FilePath $file.FullName
+        $fileDurations.Add([double]$d)
+        $totalDurationSec += $d
     }
     if ($totalDurationSec -gt 0) {
         $ts = [TimeSpan]::FromSeconds($totalDurationSec)
         Write-Host ($Strings.Convert_TotalDuration -f $ts.ToString('g'))
+    }
+    # * Determine if durations are near-uniform (within fixed 2s or 3% tolerance)
+    $areUniformDurations = $false
+    if ($fileDurations.Count -gt 0) {
+        $minD = ($fileDurations | Measure-Object -Minimum).Minimum
+        $maxD = ($fileDurations | Measure-Object -Maximum).Maximum
+        $absTol = 2.0
+        $relTol = 0.03
+        $span = [math]::Abs($maxD - $minD)
+        $refD = [math]::Max(1.0, ($fileDurations | Measure-Object -Average).Average)
+        if (($span -le $absTol) -or (($span / $refD) -le $relTol)) { $areUniformDurations = $true }
     }
     
     $processedDurationSec = 0
@@ -267,18 +330,32 @@ function Convert-Videos {
 
     foreach ($file in $filesToConvert) {
         $fileCounter++
-        $currentDuration = Get-VideoDuration -FilePath $file.FullName
+        # * Use pre-probed duration to avoid calling ffprobe twice
+        $currentDuration = if ($fileCounter -le $fileDurations.Count) { $fileDurations[$fileCounter - 1] } else { Get-VideoDuration -FilePath $file.FullName }
 
         # --- Progress Bar Update (initialize per-file ETA countdown) ---
         $percentComplete = if ($totalCount -gt 0) { ($fileCounter / $totalCount) * 100 } else { 0 }
         $status = "Processing {0} ({1}/{2})" -f $file.Name, $fileCounter, $totalCount
-        $etaCountdownSec = -1
-        if ($processedDurationSec -gt 0 -and $totalDurationSec -gt 0) {
+        # * Initialize ETA countdown (monotonic). Compute initial estimate once per file.
+        $etaInitialSec = -1
+        if ($areUniformDurations) {
+            $completedFiles = [double]($fileCounter - 1)
+            $fractionOfCurrent = 0.0
+            if ($currentDuration -gt 0) { $fractionOfCurrent = 0.0 }
+            $processedUnits = $completedFiles + $fractionOfCurrent
             $elapsedSec = $batchTimer.Elapsed.TotalSeconds
-            $rate = $processedDurationSec / $elapsedSec
-            $remainingSec = $totalDurationSec - $processedDurationSec
-            if ($rate -gt 0) { $etaCountdownSec = [int]($remainingSec / $rate) }
+            $avgPerFileSec = if ($processedUnits -gt 0) { $elapsedSec / $processedUnits } else { 0 }
+            $remainingUnits = [math]::Max(0.0, [double]$totalCount - $processedUnits)
+            if ($avgPerFileSec -gt 0) { $etaInitialSec = [int][math]::Ceiling($remainingUnits * $avgPerFileSec) }
+        } else {
+            if ($processedDurationSec -gt 0 -and $totalDurationSec -gt 0) {
+                $elapsedSec = $batchTimer.Elapsed.TotalSeconds
+                $rate = if ($elapsedSec -gt 0) { $processedDurationSec / $elapsedSec } else { 0 }
+                $remainingSec = $totalDurationSec - $processedDurationSec
+                if ($rate -gt 0) { $etaInitialSec = [int][math]::Ceiling($remainingSec / $rate) }
+            }
         }
+        $etaCountdownSec = if ($etaInitialSec -ge 0) { $etaInitialSec } else { -1 }
         $etaDisplayInit = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
         Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplayInit) -PercentComplete $percentComplete -SecondsRemaining -1
         
@@ -290,6 +367,10 @@ function Convert-Videos {
         
         $outputFile = Join-Path -Path $destinationDir -ChildPath "$($file.BaseName).mp4"
         
+        # * Select decoder based on INPUT codec, not the chosen OUTPUT encoder.
+        $inputCodec = Get-VideoCodecName -FilePath $file.FullName
+        $decoderArgs = Get-DecoderArgsForCodec -CodecName $inputCodec -DecodersText $availableDecodersText
+
         $ffmpegArgs = [System.Collections.Generic.List[string]]@(
             '-y',
             '-hide_banner',
@@ -297,7 +378,7 @@ function Convert-Videos {
         )
         
         # * Decoder arguments must come BEFORE the input file
-        $ffmpegArgs.AddRange([string[]]$codecInfo.DecoderArgs)
+        $ffmpegArgs.AddRange([string[]]$decoderArgs)
         $ffmpegArgs.Add('-i')
         $ffmpegArgs.Add($file.FullName)
         
@@ -346,15 +427,107 @@ function Convert-Videos {
                 }
             } catch { }
 
+            # * Compute dynamic percent and ETA
             $dynamicProcessed = $processedDurationSec + $curFileSec
-            $overallPercent = if ($totalDurationSec -gt 0) { ($dynamicProcessed / $totalDurationSec) * 100 } else { $percentComplete }
-            if ($etaCountdownSec -ge 0) { $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0) }
-            $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
-            Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
+            if ($areUniformDurations) {
+                $completedFiles = [double]($fileCounter - 1)
+                $fractionOfCurrent = 0.0
+                if ($currentDuration -gt 0) { $fractionOfCurrent = [math]::Min([double]$curFileSec / [double]$currentDuration, 1.0) }
+                $processedUnits = $completedFiles + $fractionOfCurrent
+                $overallPercent = ([double]$processedUnits / [double]$totalCount) * 100.0
+                $elapsedSec = $batchTimer.Elapsed.TotalSeconds
+                $avgPerFileSec = if ($processedUnits -gt 0) { $elapsedSec / $processedUnits } else { 0 }
+                $remainingUnits = [math]::Max(0.0, [double]$totalCount - $processedUnits)
+                $etaComputedSec = if ($avgPerFileSec -gt 0) { [int][math]::Ceiling($remainingUnits * $avgPerFileSec) } else { -1 }
+                if ($etaComputedSec -ge 0) {
+                    $etaCountdownSec = $etaComputedSec
+                } elseif ($etaCountdownSec -ge 0) {
+                    $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0)
+                } else {
+                    $etaCountdownSec = -1
+                }
+                $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
+                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
+            } else {
+                $overallPercent = if ($totalDurationSec -gt 0) { ($dynamicProcessed / $totalDurationSec) * 100 } else { $percentComplete }
+                $elapsedSec = $batchTimer.Elapsed.TotalSeconds
+                $rate = if ($elapsedSec -gt 0) { $dynamicProcessed / $elapsedSec } else { 0 }
+                $remainingSec = [double][math]::Max(0.0, $totalDurationSec - $dynamicProcessed)
+                $etaComputedSec = if ($rate -gt 0) { [int][math]::Ceiling($remainingSec / $rate) } else { -1 }
+                if ($etaComputedSec -ge 0) {
+                    $etaCountdownSec = $etaComputedSec
+                } elseif ($etaCountdownSec -ge 0) {
+                    $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0)
+                } else {
+                    $etaCountdownSec = -1
+                }
+                $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
+                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
+            }
             Start-Sleep -Seconds 1
         }
         $fileStopwatch.Stop()
         if (Test-Path -LiteralPath $progressFile) { Remove-Item -LiteralPath $progressFile -Force -ErrorAction SilentlyContinue }
+
+        # * If first attempt fails and a forced decoder was used, retry without forcing decoder (auto/CPU fallback).
+        if (($proc.ExitCode -ne 0) -and ($decoderArgs.Count -gt 0)) {
+            # ! Remove partial output before retry
+            if (Test-Path -LiteralPath $outputFile) { Remove-Item -LiteralPath $outputFile -Force -ErrorAction SilentlyContinue }
+
+            # * Rebuild args without decoder override
+            $ffmpegArgs2 = [System.Collections.Generic.List[string]]@(
+                '-y',
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-i', $file.FullName
+            )
+            $ffmpegArgs2.AddRange([string[]]$codecInfo.EncoderArgs)
+            $ffmpegArgs2.AddRange([string[]]@(
+                '-vf', "scale='if(gt(iw,ih),-2,720)':'if(gt(iw,ih),720,-2)':flags=lanczos,format=yuv420p"
+            ))
+            $ffmpegArgs2.AddRange([string[]]@(
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-af', 'acompressor=threshold=-21dB:ratio=4:attack=20:release=250',
+                '-map_metadata', '0',
+                '-movflags', '+faststart',
+                $outputFile
+            ))
+
+            $progressFile2 = [System.IO.Path]::GetTempFileName()
+            $ffmpegArgs2.Add('-progress')
+            $ffmpegArgs2.Add($progressFile2)
+
+            $proc = Start-Process -FilePath $ffexe -ArgumentList $ffmpegArgs2.ToArray() -NoNewWindow -PassThru
+            while (-not $proc.HasExited) {
+                # * Keep overall percent based on dynamicProcessed like above; no separate ETA handling to avoid duplication
+                $curFileSec = 0
+                try {
+                    if (Test-Path -LiteralPath $progressFile2) {
+                        $lines = Get-Content -LiteralPath $progressFile2 -ErrorAction SilentlyContinue
+                        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+                            $line = $lines[$i]
+                            if ($line -like 'out_time_ms=*') {
+                                $val = ($line -replace 'out_time_ms=','')
+                                [double]$ms = 0; [void][double]::TryParse($val, [ref]$ms)
+                                if ($ms -gt 0) { $curFileSec = [int]($ms / 1000000) }
+                                break
+                            }
+                            elseif ($line -like 'out_time=*') {
+                                $t = ($line -replace 'out_time=','')
+                                $ts = $null; if ([TimeSpan]::TryParse($t, [ref]$ts)) { $curFileSec = [int]$ts.TotalSeconds; break }
+                            }
+                        }
+                    }
+                } catch { }
+
+                $dynamicProcessed = $processedDurationSec + $curFileSec
+                $overallPercent = if ($totalDurationSec -gt 0) { ($dynamicProcessed / $totalDurationSec) * 100 } else { $percentComplete }
+                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: N/A") -PercentComplete $overallPercent -SecondsRemaining -1
+                Start-Sleep -Seconds 1
+            }
+            if (Test-Path -LiteralPath $progressFile2) { Remove-Item -LiteralPath $progressFile2 -Force -ErrorAction SilentlyContinue }
+        }
 
         if ($proc.ExitCode -eq 0) {
             Write-Host ($Strings.Convert_ConvertSuccess -f $outputFile)
