@@ -269,6 +269,8 @@ function Convert-Videos {
         foreach ($file in $filesToCopy) {
             try {
                 $relativePath = $file.FullName.Substring($sourceFolder.Length)
+                # * Normalize relative path to avoid leading separator that would break Join-Path semantics
+                if ($relativePath -and ($relativePath[0] -eq '\\' -or $relativePath[0] -eq '/')) { $relativePath = $relativePath.Substring(1) }
                 $destinationPath = Join-Path -Path $OutputDirectory -ChildPath $relativePath
                 $destinationDir = Split-Path -Path $destinationPath -Parent
                 if (-not (Test-Path -LiteralPath $destinationDir)) {
@@ -360,6 +362,8 @@ function Convert-Videos {
         Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplayInit) -PercentComplete $percentComplete -SecondsRemaining -1
         
         $relativePath = $file.FullName.Substring($sourceFolder.Length)
+        # * Normalize relative path to avoid leading separator that would break Join-Path semantics
+        if ($relativePath -and ($relativePath[0] -eq '\\' -or $relativePath[0] -eq '/')) { $relativePath = $relativePath.Substring(1) }
         $destinationDir = Join-Path -Path $OutputDirectory -ChildPath (Split-Path $relativePath -Parent)
         if (-not (Test-Path -LiteralPath $destinationDir)) {
             New-Item -ItemType Directory -Path $destinationDir | Out-Null
@@ -533,8 +537,13 @@ function Convert-Videos {
             Write-Host ($Strings.Convert_ConvertSuccess -f $outputFile)
             $script:stats.success++
             $script:stats.bytes_in += $file.Length
-            try { $script:stats.bytes_out += (Get-Item -LiteralPath $outputFile -ErrorAction Stop).Length } catch {}
-            if ($deleteAfterConvert) {
+            $convertedOk = $false
+            try {
+                $outItem = Get-Item -LiteralPath $outputFile -ErrorAction Stop
+                $script:stats.bytes_out += $outItem.Length
+                if ($outItem.Length -gt 0) { $convertedOk = $true }
+            } catch { $convertedOk = $false }
+            if ($deleteAfterConvert -and $convertedOk) {
                 Remove-Item -LiteralPath $file.FullName -Force
             }
         } else {
