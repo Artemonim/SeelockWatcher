@@ -48,6 +48,23 @@ if ($PSBoundParameters.ContainsKey('Preserve')) {
     $deleteAfterConvert = -not $Preserve.IsPresent
 }
 #endregion
+# * Video extensions shared between conversion and cleanup.
+$videoExtensions = @('.mp4', '.mov', '.avi', '.mkv', '.webm')
+# * Retention policy defaults: age threshold and behavior.
+$retentionDays = 60
+if ($Config.ContainsKey('RetentionDays')) {
+    try {
+        $retentionDays = [int]::Parse($Config.RetentionDays)
+    } catch { }
+}
+$retentionDays = [math]::Max(1, $retentionDays)
+$retentionMode = 'auto'
+if ($Config.ContainsKey('RetentionMode')) {
+    $mode = $Config.RetentionMode.Trim().ToLowerInvariant()
+    if ($mode -in @('auto', 'prompt')) {
+        $retentionMode = $mode
+    }
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -540,6 +557,98 @@ function Convert-Videos {
 
     $batchTimer.Stop()
     Write-Progress -Activity "Converting Videos" -Completed
+
+    if ($retentionDays -gt 0) {
+        Remove-OldArchiveFiles -ArchiveRoot $OutputDirectory -RetentionDays $retentionDays -Mode $retentionMode
+    }
+}
+
+# * Computes the relative path of a child entry under a reference folder.
+function Get-RelativeChildPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    $baseResolved = $null
+    $targetResolved = $null
+    try { $baseResolved = (Resolve-Path -LiteralPath $BasePath -ErrorAction Stop).ProviderPath } catch { $baseResolved = $BasePath }
+    try { $targetResolved = (Resolve-Path -LiteralPath $TargetPath -ErrorAction Stop).ProviderPath } catch { $targetResolved = $TargetPath }
+
+    if (-not $baseResolved -or -not $targetResolved) { return $targetResolved }
+    $normalizedBase = $baseResolved.TrimEnd('\', '/')
+    if ($targetResolved.Length -le $normalizedBase.Length) { return $targetResolved }
+    $relative = $targetResolved.Substring($normalizedBase.Length)
+    if ($relative.StartsWith('\') -or $relative.StartsWith('/')) { $relative = $relative.Substring(1) }
+    return $relative
+}
+
+# * Removes stale video files older than the retention threshold and prunes empty directories.
+function Remove-OldArchiveFiles {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        [Parameter(Mandatory = $true)][int]$RetentionDays,
+        [Parameter(Mandatory = $true)][string]$Mode
+    )
+
+    if (-not (Test-Path -LiteralPath $ArchiveRoot)) { return }
+    if ($RetentionDays -le 0) { return }
+
+    $resolvedRoot = $null
+    try { $resolvedRoot = (Resolve-Path -LiteralPath $ArchiveRoot -ErrorAction Stop).ProviderPath } catch { $resolvedRoot = $ArchiveRoot }
+    Write-Host ($Strings.Convert_RetentionScanning -f $resolvedRoot, $RetentionDays)
+
+    $cutoff = (Get-Date).AddDays(-$RetentionDays)
+    $candidateFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+        $ext = $_.Extension.ToLowerInvariant()
+        ($videoExtensions -contains $ext) -and ($_.LastWriteTime -lt $cutoff)
+    })
+
+    if (-not $candidateFiles -or $candidateFiles.Count -eq 0) {
+        Write-Host ($Strings.Convert_RetentionNone -f $RetentionDays)
+        return
+    }
+
+    $fileCount = $candidateFiles.Count
+    Write-Host ($Strings.Convert_RetentionFound -f $fileCount, $RetentionDays)
+
+    if ($Mode -eq 'prompt') {
+        foreach ($file in $candidateFiles) {
+            $relativePath = Get-RelativeChildPath -BasePath $resolvedRoot -TargetPath $file.FullName
+            Write-Host ("  - {0}" -f $relativePath)
+        }
+        $userInput = Read-Host ($Strings.Convert_RetentionPrompt -f $RetentionDays)
+        if ($userInput.Trim().ToLowerInvariant() -notmatch '^(y|д|yes|да)$') {
+            Write-Host $Strings.Convert_RetentionSkipped
+            return
+        }
+    }
+
+    Write-Host $Strings.Convert_RetentionDeleting
+    $deletedCount = 0
+    foreach ($file in $candidateFiles) {
+        try {
+            Remove-Item -LiteralPath $file.FullName -Force
+            $deletedCount++
+        } catch {
+            Write-Warning ("Failed to delete '{0}': {1}" -f $file.FullName, $_.Exception.Message)
+        }
+    }
+    Write-Host ($Strings.Convert_RetentionDeleted -f $deletedCount)
+
+    Write-Host $Strings.Convert_RetentionCleaning
+    $directories = Get-ChildItem -LiteralPath $resolvedRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object -Property @{ Expression = { $_.FullName.Length }; Descending = $true }
+    foreach ($dir in $directories) {
+        if ($null -eq (Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            try {
+                Remove-Item -LiteralPath $dir.FullName -Force
+                Write-Host ($Strings.Convert_RetentionDirClean -f $dir.FullName)
+            } catch {
+                Write-Warning ("Failed to remove directory '{0}': {1}" -f $dir.FullName, $_.Exception.Message)
+            }
+        }
+    }
 }
 
 try {

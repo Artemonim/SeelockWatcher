@@ -42,6 +42,15 @@ FFmpeg не установлен или не доступен в системн�
         Summary_Elapsed          = "  - Затраченное время: {0}"
         Summary_SizeDelta        = "  - Изменение общего размера: {0}{1:N2} MB ({2}{3:N2}%)"
         Summary_OutputFolder     = "  - Папка результата: {0}"
+        Convert_RetentionScanning = "Проверка '{0}' на файлы старше {1} дней..."
+        Convert_RetentionNone     = "Файлов старше {0} дней не найдено."
+        Convert_RetentionFound    = "Найдено {0} файла(-ов), старше {1} дней."
+        Convert_RetentionPrompt   = "Удалить эти файлы старше {0} дней? (Y/N)"
+        Convert_RetentionDeleting = "Удаляю устаревшие файлы..."
+        Convert_RetentionDeleted  = "Удалено {0} файла(-ов)."
+        Convert_RetentionSkipped  = "Удаление отменено пользователем."
+        Convert_RetentionCleaning = "Удаляю пустые папки..."
+        Convert_RetentionDirClean = "Удалена пустая папка: {0}"
     }
 } else {
     # English strings (default)
@@ -81,6 +90,15 @@ Please download it from https://ffmpeg.org/ and ensure ffmpeg.exe is in your PAT
         Summary_Elapsed          = "  - Elapsed time: {0}"
         Summary_SizeDelta        = "  - Total size delta: {0}{1:N2} MB ({2}{3:N2}%)"
         Summary_OutputFolder     = "  - Output folder: {0}"
+        Convert_RetentionScanning = "Scanning '{0}' for files older than {1} day(s)..."
+        Convert_RetentionNone     = "No files older than {0} day(s) were found."
+        Convert_RetentionFound    = "Found {0} file(s) older than {1} day(s)."
+        Convert_RetentionPrompt   = "Delete files older than {0} day(s)? (Y/N)"
+        Convert_RetentionDeleting = "Deleting stale files..."
+        Convert_RetentionDeleted  = "Deleted {0} file(s)."
+        Convert_RetentionSkipped  = "Old files are left in place."
+        Convert_RetentionCleaning = "Removing empty directories..."
+        Convert_RetentionDirClean = "Removed empty directory: {0}"
     }
 }
 
