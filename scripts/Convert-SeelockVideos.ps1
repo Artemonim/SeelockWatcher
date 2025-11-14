@@ -431,44 +431,23 @@ function Convert-Videos {
                 }
             } catch { }
 
-            # * Compute dynamic percent and ETA
+            # * Compute percent to reflect already processed frames
             $dynamicProcessed = $processedDurationSec + $curFileSec
             if ($areUniformDurations) {
                 $completedFiles = [double]($fileCounter - 1)
                 $fractionOfCurrent = 0.0
                 if ($currentDuration -gt 0) { $fractionOfCurrent = [math]::Min([double]$curFileSec / [double]$currentDuration, 1.0) }
                 $processedUnits = $completedFiles + $fractionOfCurrent
-                $overallPercent = ([double]$processedUnits / [double]$totalCount) * 100.0
-                $elapsedSec = $batchTimer.Elapsed.TotalSeconds
-                $avgPerFileSec = if ($processedUnits -gt 0) { $elapsedSec / $processedUnits } else { 0 }
-                $remainingUnits = [math]::Max(0.0, [double]$totalCount - $processedUnits)
-                $etaComputedSec = if ($avgPerFileSec -gt 0) { [int][math]::Ceiling($remainingUnits * $avgPerFileSec) } else { -1 }
-                if ($etaComputedSec -ge 0) {
-                    $etaCountdownSec = $etaComputedSec
-                } elseif ($etaCountdownSec -ge 0) {
-                    $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0)
-                } else {
-                    $etaCountdownSec = -1
-                }
-                $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
-                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
+                $overallPercent = if ($totalCount -gt 0) { ([double]$processedUnits / [double]$totalCount) * 100.0 } else { 0 }
             } else {
                 $overallPercent = if ($totalDurationSec -gt 0) { ($dynamicProcessed / $totalDurationSec) * 100 } else { $percentComplete }
-                $elapsedSec = $batchTimer.Elapsed.TotalSeconds
-                $rate = if ($elapsedSec -gt 0) { $dynamicProcessed / $elapsedSec } else { 0 }
-                $remainingSec = [double][math]::Max(0.0, $totalDurationSec - $dynamicProcessed)
-                $etaComputedSec = if ($rate -gt 0) { [int][math]::Ceiling($remainingSec / $rate) } else { -1 }
-                if ($etaComputedSec -ge 0) {
-                    $etaCountdownSec = $etaComputedSec
-                } elseif ($etaCountdownSec -ge 0) {
-                    $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0)
-                } else {
-                    $etaCountdownSec = -1
-                }
-                $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
-                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
             }
+
+            $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
+            Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
             Start-Sleep -Seconds 1
+            # * Tick ETA countdown so timer loses one second per sleep cycle
+            if ($etaCountdownSec -ge 0) { $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0) }
         }
         $fileStopwatch.Stop()
         if (Test-Path -LiteralPath $progressFile) { Remove-Item -LiteralPath $progressFile -Force -ErrorAction SilentlyContinue }
@@ -504,7 +483,6 @@ function Convert-Videos {
 
             $proc = Start-Process -FilePath $ffexe -ArgumentList $ffmpegArgs2.ToArray() -NoNewWindow -PassThru
             while (-not $proc.HasExited) {
-                # * Keep overall percent based on dynamicProcessed like above; no separate ETA handling to avoid duplication
                 $curFileSec = 0
                 try {
                     if (Test-Path -LiteralPath $progressFile2) {
@@ -527,8 +505,11 @@ function Convert-Videos {
 
                 $dynamicProcessed = $processedDurationSec + $curFileSec
                 $overallPercent = if ($totalDurationSec -gt 0) { ($dynamicProcessed / $totalDurationSec) * 100 } else { $percentComplete }
-                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: N/A") -PercentComplete $overallPercent -SecondsRemaining -1
+                $etaDisplay = if ($etaCountdownSec -ge 0) { ([TimeSpan]::FromSeconds($etaCountdownSec)).ToString('hh\:mm\:ss') } else { 'N/A' }
+                Write-Progress -Activity "Converting Videos" -Status ($status + " ETA: " + $etaDisplay) -PercentComplete $overallPercent -SecondsRemaining -1
                 Start-Sleep -Seconds 1
+                # * Tick ETA countdown to keep fallback display aligned with timer
+                if ($etaCountdownSec -ge 0) { $etaCountdownSec = [math]::Max($etaCountdownSec - 1, 0) }
             }
             if (Test-Path -LiteralPath $progressFile2) { Remove-Item -LiteralPath $progressFile2 -Force -ErrorAction SilentlyContinue }
         }
