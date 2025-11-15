@@ -583,6 +583,43 @@ function Get-RelativeChildPath {
     return $relative
 }
 
+# * Parses the Seelock-style date folder name and returns the implied recording date.
+function Get-ArchiveDateFromFolderName {
+    param([Parameter(Mandatory = $true)][string]$FolderName)
+    $trimmed = $FolderName.Trim()
+    if (-not $trimmed) { return $null }
+    $match = [regex]::Match($trimmed, '^(?<year>\d{2})(?<month>\d{2})(?<day>\d{2})')
+    if (-not $match.Success) { return $null }
+
+    $yearValue = [int]$match.Groups['year'].Value
+    $year = if ($yearValue -ge 70) { 1900 + $yearValue } else { 2000 + $yearValue }
+    $month = [int]$match.Groups['month'].Value
+    $day = [int]$match.Groups['day'].Value
+
+    try {
+        return [DateTime]::new($year, $month, $day)
+    } catch {
+        return $null
+    }
+}
+
+# * Derives the recording date for a file by inspecting the top-level archive folder.
+function Get-ArchiveDateFromPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    $relative = Get-RelativeChildPath -BasePath $BasePath -TargetPath $TargetPath
+    if (-not $relative) { return $null }
+    $trimmed = $relative.TrimStart('\', '/')
+    if (-not $trimmed) { return $null }
+
+    $segments = $trimmed -split '[\\/]', 2
+    if (-not $segments -or -not $segments[0]) { return $null }
+    return Get-ArchiveDateFromFolderName -FolderName $segments[0]
+}
+
 # * Removes stale video files older than the retention threshold and prunes empty directories.
 function Remove-OldArchiveFiles {
     param(
@@ -601,7 +638,10 @@ function Remove-OldArchiveFiles {
     $cutoff = (Get-Date).AddDays(-$RetentionDays)
     $candidateFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         $ext = $_.Extension.ToLowerInvariant()
-        ($videoExtensions -contains $ext) -and ($_.LastWriteTime -lt $cutoff)
+        if (-not ($videoExtensions -contains $ext)) { return $false }
+        $folderDate = Get-ArchiveDateFromPath -BasePath $resolvedRoot -TargetPath $_.FullName
+        if ($folderDate -and ($folderDate -lt $cutoff)) { return $true }
+        return ($_.LastWriteTime -lt $cutoff)
     })
 
     if (-not $candidateFiles -or $candidateFiles.Count -eq 0) {
