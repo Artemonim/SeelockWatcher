@@ -120,7 +120,16 @@ try {
     $convertScriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'scripts\Convert-SeelockVideos.ps1'
 
     Write-Host ($Strings.Sync_ConversionStarting -f $driveLetter, $OutputRoot)
-    $convArgs = @('-InputDrive', $driveLetter, '-OutputDirectory', $OutputRoot)
+
+    # * If the user explicitly provided -OutputRoot, forward it to the converter.
+    # * If not provided, do not pass -OutputDirectory so the converter can read
+    # * `OutputPath` from `Config.ini`.
+    if ($PSBoundParameters.ContainsKey('OutputRoot')) {
+        $convArgs = @('-InputDrive', $driveLetter, '-OutputDirectory', $OutputRoot)
+    } else {
+        $convArgs = @('-InputDrive', $driveLetter)
+    }
+
     if ($Preserve.IsPresent) { $convArgs += '-Preserve' }
     $convInvoke = Invoke-ExternalScript -ScriptPath $convertScriptPath -Arguments $convArgs
     if ($convInvoke.ExitCode -ne 0) { throw $Strings.Sync_ConversionFailed }

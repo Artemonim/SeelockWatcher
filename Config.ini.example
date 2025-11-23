@@ -1,0 +1,18 @@
+[Settings]
+; Path to Seelock Connect LTE executable
+ExePath = C:\Program Files\Seelock Connect LTE\SeelockConnectLTE.exe
+
+; Password for the device
+Password = 000000
+
+; The root directory where converted videos will be stored
+OutputPath = ./Videos
+
+; If true, the original video files will be deleted after conversion.
+DeleteAfterConvert = true
+
+; Number of days after which converted videos are eligible for cleanup
+RetentionDays = 60
+
+; Auto-delete stale files (auto) or prompt before deleting (prompt)
+RetentionMode = auto

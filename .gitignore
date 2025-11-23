@@ -31,6 +31,7 @@ temporary/
 # Local config
 Language.ini
 seelock.ico
+Config.ini
 
 # OS X
 .DS_Store
