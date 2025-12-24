@@ -179,6 +179,70 @@ function Write-Summary {
     Write-Host ($Strings.Summary_OutputFolder -f $fullOut)
 }
 
+# * Returns a concise message extracted from an exception object.
+function Get-MostRelevantExceptionMessage {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    try {
+        if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Message) { return $ErrorRecord.Exception.Message }
+    } catch { }
+    try { return ($ErrorRecord | Out-String).Trim() } catch { return 'Unhandled error' }
+}
+
+# * Heuristic to detect that an exception was caused by the USB drive / mount becoming unavailable.
+# * Checks common English/Russian phrases produced by PowerShell/.NET when a drive is removed.
+function Is-DeviceDisconnectedException {
+    param([string]$Message)
+    if (-not $Message) { return $false }
+    $patterns = @(
+        'Cannot find drive',
+        'A drive with the name',
+        'The device is not ready',
+        'The system cannot find the path specified',
+        'The system cannot find the file specified',
+        'device not ready',
+        'устройство не готово',
+        'невозможно найти диск',
+        'не удается найти путь'
+    )
+    foreach ($p in $patterns) {
+        if ($Message -match [regex]::Escape($p)) { return $true }
+        if ($Message -match $p) { return $true }
+    }
+    return $false
+}
+
+# * Prints a user-friendly Russian explanation and suggested actions when the device disappears mid-run.
+function Write-DeviceDisconnectedAdvice {
+    param(
+        [string]$DriveLetter,
+        [string]$CurrentFile,
+        [string]$RawErrorMessage
+    )
+    if (-not $DriveLetter) { $DriveLetter = $InputDrive }
+    Write-Host ""
+    Write-Host "----------------------------------------"
+    Write-Host "[ОШИБКА] Устройство отключилось во время конвертации."
+    if ($DriveLetter) { Write-Host ("Устройство/буква диска: {0}" -f $DriveLetter) }
+    if ($CurrentFile) { Write-Host ("Файл в момент ошибки: {0}" -f $CurrentFile) }
+    Write-Host ""
+    Write-Host "Возможные причины:"
+    Write-Host "- Отключён кабель USB или SD-карта вытянута."
+    Write-Host "- Устройство разрядилось или перезагрузилось."
+    Write-Host "- Временная ошибка ОС при монтировании устройства."
+    Write-Host ""
+    Write-Host "Рекомендации:"
+    Write-Host "- Подключите устройство заново и убедитесь, что Windows видит его как том (например, E:)."
+    Write-Host "- Проверьте кабель, разъёмы и питание устройства."
+    Write-Host "- Если вы хотите продолжить обработку оставшихся файлов, повторно запустите скрипт — он пропустит уже сконвертированные файлы."
+    Write-Host "- Возможен частичный результат для файла, который конвертировался в момент разрыва; проверьте папку результата и удалите повреждённые файлы вручную при необходимости."
+    Write-Host ""
+    if ($RawErrorMessage) {
+        Write-Host ("Техническое сообщение об ошибке: {0}" -f $RawErrorMessage)
+    }
+    Write-Host "----------------------------------------"
+    Write-Host ""
+}
+
 function Get-BestFfmpegVideoCodec {
     $ffmpegPath = Get-Command ffmpeg.exe | Select-Object -ExpandProperty Source
     $allEncoders = (& $ffmpegPath -encoders 2>&1)
@@ -296,6 +360,23 @@ function Convert-Videos {
                 Copy-Item -LiteralPath $file.FullName -Destination $destinationPath -Force
                 Write-Host ("  -> Copied: {0}" -f $relativePath.TrimStart('\'))
                 $script:stats.copied++
+
+                # * If configured to delete originals after processing, attempt to remove the source file
+                try {
+                    $destItem = Get-Item -LiteralPath $destinationPath -ErrorAction Stop
+                    if ($deleteAfterConvert) {
+                        try {
+                            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                            # Update byte counters to reflect the copy operation
+                            $script:stats.bytes_in += $file.Length
+                            $script:stats.bytes_out += $destItem.Length
+                        } catch {
+                            Write-Warning ("Failed to delete original copied file '{0}': {1}" -f $file.FullName, $_.Exception.Message)
+                        }
+                    }
+                } catch {
+                    Write-Warning ("Copied file not found at destination after copy: {0}" -f $destinationPath)
+                }
             } catch {
                 Write-Host ("[ERROR] Failed to copy '{0}': {1}" -f $file.Name, $_.Exception.Message)
                 $script:stats.copy_errors++
@@ -709,9 +790,20 @@ try {
     }
 } catch {
     $e = $_
-    $errMsg = $null
-    try { $errMsg = $e.Exception.Message } catch { }
-    if (-not $errMsg) { try { $errMsg = ($e | Out-String) } catch { $errMsg = 'Unhandled error' } }
+    $errMsg = Get-MostRelevantExceptionMessage -ErrorRecord $e
+
+    # * If the exception looks like the USB drive was removed, provide a clearer explanation and actionable advice.
+    if (Is-DeviceDisconnectedException -Message $errMsg) {
+        # Try to extract a drive letter mentioned in the message or fall back to $InputDrive
+        $driveLetter = $null
+        if ($errMsg -match '([A-Z]:)') { $driveLetter = $Matches[1] }
+        Write-DeviceDisconnectedAdvice -DriveLetter $driveLetter -CurrentFile $null -RawErrorMessage $errMsg
+        # Still print short machine-friendly line for logs
+        Write-Host ("[ERROR] Device disconnected: {0}" -f $errMsg)
+        exit 2
+    }
+
+    # * Fallback: print generic error and exit non-zero.
     Write-Host ("[ERROR] {0}" -f $errMsg)
     exit 1
 }
