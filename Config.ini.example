@@ -16,3 +16,6 @@ RetentionDays = 60
 
 ; Auto-delete stale files (auto) or prompt before deleting (prompt)
 RetentionMode = auto
+
+; If true, retention cleanup deletes files to Recycle Bin instead of permanent removal
+DeleteToRecycleBin = true

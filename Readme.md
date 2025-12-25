@@ -9,11 +9,13 @@
 ## Возможности
 
 -   Автоматическое подключение к устройству и монтирование его как диска.
+-   Принудительная синхронизация даты/времени на устройстве перед монтированием USB диска.
 -   Поиск всех видеофайлов на устройстве.
 -   Конвертация видео в формат 720p MP4 (H.264/H.265) для экономии места.
 -   Автоматическое определение наилучшего доступного аппаратного кодировщика (NVIDIA NVENC, AMD AMF, Intel QSV) для максимальной скорости.
 -   Копирование не-видео файлов для полного сохранения структуры папок с устройства.
 -   Удаление исходных файлов после конвертации (настраивается).
+-   Очистка архива по сроку хранения (`RetentionDays`), с защитой от удаления свежих файлов при сбросе даты на устройстве.
 
 ## Требования
 
@@ -30,6 +32,9 @@
     -   `Password`: Пароль для доступа к устройству. По умолчанию: `000000`.
     -   `OutputPath`: Папка для сохранения сконвертированных видео. По умолчанию: `./Videos`.
     -   `DeleteAfterConvert`: `true` для удаления оригиналов после конвертации, `false` чтобы их оставить. По умолчанию: `true`.
+    -   `RetentionDays`: Количество дней хранения (после этого срока видео кандидаты на удаление). По умолчанию: `60`.
+    -   `RetentionMode`: `auto` (удалять автоматически) или `prompt` (всегда спрашивать). По умолчанию: `auto`.
+    -   `DeleteToRecycleBin`: `true`, чтобы удаление по `RetentionDays` отправляло файлы в корзину. По умолчанию: `true`.
 
 ## Использование
 
@@ -53,11 +58,13 @@ This application is designed for convenient video backup. The intended workflow 
 ## Features
 
 -   Automatically connects to the device and mounts it as a drive.
+-   Forces a device date/time sync before mounting the USB disk.
 -   Finds all video files on the device.
 -   Converts videos to 720p MP4 (H.264/H.265) to save space.
 -   Automatically detects the best available hardware encoder (NVIDIA NVENC, AMD AMF, Intel QSV) for maximum speed.
 -   Copies non-video files to fully preserve the folder structure from the device.
 -   Deletes original files after conversion (configurable).
+-   Cleans up the archive based on retention (`RetentionDays`), with protection against deleting freshly imported files when the device clock resets.
 
 ## Requirements
 
@@ -74,6 +81,9 @@ This application is designed for convenient video backup. The intended workflow 
     -   `Password`: Password to access the device. Default: `000000`.
     -   `OutputPath`: Folder to save converted videos. Default: `./Videos`.
     -   `DeleteAfterConvert`: `true` to delete original files after conversion, `false` to keep them. Default: `true`.
+    -   `RetentionDays`: Number of days to keep files (older files become deletion candidates). Default: `60`.
+    -   `RetentionMode`: `auto` (delete automatically) or `prompt` (always ask). Default: `auto`.
+    -   `DeleteToRecycleBin`: `true` to send retention deletions to Recycle Bin. Default: `true`.
 
 ## Usage
 

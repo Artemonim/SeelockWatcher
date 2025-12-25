@@ -224,6 +224,32 @@ function Find-UsbButtonAcrossWindows {
 	return $null
 }
 
+function Find-DateTimeButtonAcrossWindows {
+	param([int]$ProcessId, [int]$TimeoutSec)
+	$deadline = (Get-Date).AddSeconds($TimeoutSec)
+	$ae = [System.Windows.Automation.AutomationElement]
+	$ct = [System.Windows.Automation.ControlType]::Button
+	$typeCond = New-Object System.Windows.Automation.PropertyCondition($ae::ControlTypeProperty, $ct)
+	$exactNames = @('Дата/время','Дата/Время','Date/Time','Date Time')
+	$pattern = '(?i)(дата\s*/?\s*время|date\s*/?\s*time|time\s*/?\s*date)'
+	while ((Get-Date) -lt $deadline) {
+		$wins = Get-TopLevelWindowsByProcessId -ProcessId $ProcessId
+		foreach ($wEl in @($wins)) {
+			try {
+				$btns = $wEl.FindAll([System.Windows.Automation.TreeScope]::Descendants, $typeCond)
+				for ($i = 0; $i -lt $btns.Count; $i++) {
+					$name = $btns.Item($i).Current.Name
+					if (-not $name) { continue }
+					if ($exactNames -contains $name) { return $btns.Item($i) }
+					if ($name -match $pattern) { return $btns.Item($i) }
+				}
+			} catch { }
+		}
+		Start-Sleep -Milliseconds 100
+	}
+	return $null
+}
+
 function Find-OkButton {
 	param($Root, [int]$TimeoutSec)
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -517,6 +543,21 @@ try {
                 Invoke-FastOkSweep -ProcessId $proc.Id
                 throw "USB Disk button not found after login"
             }
+
+            # * Sync device clock before mounting USB disk (helps prevent incorrect timestamps after device date reset)
+            Write-Info "Clicking 'Дата/время' to sync device time"
+            $dateTimeBtn = Find-DateTimeButtonAcrossWindows -ProcessId $proc.Id -TimeoutSec $UiTimeoutSec
+            if ($dateTimeBtn) {
+                Invoke-ElementClick -Element $dateTimeBtn
+                Start-Sleep -Seconds $Global:ModalTimeoutSec
+                [void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec)
+                Invoke-FastOkSweep -ProcessId $proc.Id
+                # Re-acquire USB button to avoid stale automation element after modal interaction
+                $usbBtn = Find-UsbButtonAcrossWindows -ProcessId $proc.Id -TimeoutSec $UiTimeoutSec
+                Throw-If -Condition (-not $usbBtn) -Message "USB Disk button not found after Date/Time sync"
+            } else {
+                Write-Warning "Date/Time button not found; continuing without sync"
+            }
             Write-Info "Clicking '(подключить) USB диск'"
             Invoke-ElementClick -Element $usbBtn
             # * Handle success modal that appears after USB connect
@@ -577,5 +618,4 @@ finally {
 		Kill-SeelockForce
 	}
 }
-
 

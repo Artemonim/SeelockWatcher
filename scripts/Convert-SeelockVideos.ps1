@@ -65,10 +65,47 @@ if ($Config.ContainsKey('RetentionMode')) {
         $retentionMode = $mode
     }
 }
+# * If true, deletions performed by retention cleanup will go to Recycle Bin.
+$deleteToRecycleBin = $true
+if ($Config.ContainsKey('DeleteToRecycleBin')) {
+    try { $deleteToRecycleBin = [System.Convert]::ToBoolean($Config.DeleteToRecycleBin) } catch { }
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:stats = $null
+
+function Remove-ItemSafe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [bool]$UseRecycleBin = $false,
+        [switch]$Force
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath)) { return }
+
+    if (-not $UseRecycleBin) {
+        Remove-Item -LiteralPath $LiteralPath -Force:$Force -ErrorAction Stop
+        return
+    }
+
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop | Out-Null
+        $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+        try {
+            if (-not $item.PSIsContainer -and $item.IsReadOnly) { $item.IsReadOnly = $false }
+        } catch { }
+        if ($item.PSIsContainer) {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+        } else {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($item.FullName, 'OnlyErrorDialogs', 'SendToRecycleBin')
+        }
+    } catch {
+        # * Fallback to permanent removal if Recycle Bin is unavailable (e.g., some removable drives).
+        Remove-Item -LiteralPath $LiteralPath -Force:$Force -ErrorAction Stop
+    }
+}
 
 function Test-FFmpegAvailable {
     if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
@@ -717,39 +754,120 @@ function Remove-OldArchiveFiles {
     Write-Host ($Strings.Convert_RetentionScanning -f $resolvedRoot, $RetentionDays)
 
     $cutoff = (Get-Date).AddDays(-$RetentionDays)
-    $candidateFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+
+    $videoFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         $ext = $_.Extension.ToLowerInvariant()
-        if (-not ($videoExtensions -contains $ext)) { return $false }
-        $folderDate = Get-ArchiveDateFromPath -BasePath $resolvedRoot -TargetPath $_.FullName
-        if ($folderDate -and ($folderDate -lt $cutoff)) { return $true }
-        return ($_.LastWriteTime -lt $cutoff)
+        return ($videoExtensions -contains $ext)
     })
 
-    if (-not $candidateFiles -or $candidateFiles.Count -eq 0) {
+    $candidateInfos = New-Object System.Collections.Generic.List[object]
+    foreach ($file in $videoFiles) {
+        $folderDate = Get-ArchiveDateFromPath -BasePath $resolvedRoot -TargetPath $file.FullName
+        $effectiveDate = if ($folderDate) { $folderDate } else { $file.LastWriteTime }
+        if ($effectiveDate -ge $cutoff) { continue }
+
+        $arrivalDate = $file.CreationTime
+        if ($file.LastWriteTime -gt $arrivalDate) { $arrivalDate = $file.LastWriteTime }
+
+        $relativePath = Get-RelativeChildPath -BasePath $resolvedRoot -TargetPath $file.FullName
+        $candidateInfos.Add([pscustomobject]@{
+            File            = $file
+            RelativePath    = $relativePath
+            FolderDate      = $folderDate
+            EffectiveDate   = $effectiveDate
+            EffectiveSource = if ($folderDate) { 'FolderDate' } else { 'LastWriteTime' }
+            ArrivalDate     = $arrivalDate
+        })
+    }
+
+    if (-not $candidateInfos -or $candidateInfos.Count -eq 0) {
         Write-Host ($Strings.Convert_RetentionNone -f $RetentionDays)
         return
     }
 
-    $fileCount = $candidateFiles.Count
+    $fileCount = $candidateInfos.Count
     Write-Host ($Strings.Convert_RetentionFound -f $fileCount, $RetentionDays)
 
-    if ($Mode -eq 'prompt') {
-        foreach ($file in $candidateFiles) {
-            $relativePath = Get-RelativeChildPath -BasePath $resolvedRoot -TargetPath $file.FullName
-            Write-Host ("  - {0}" -f $relativePath)
+    $suspiciousInfos = @($candidateInfos | Where-Object { $_.ArrivalDate -ge $cutoff })
+    $forcePrompt = ($suspiciousInfos.Count -gt 0)
+
+    if ($forcePrompt) {
+        Write-Warning ($Strings.Convert_RetentionAnomalyDetected -f $suspiciousInfos.Count, $fileCount, $cutoff.ToString('yyyy-MM-dd'))
+        $toShow = @($suspiciousInfos | Select-Object -First 30)
+        foreach ($info in $toShow) {
+            $eff = $info.EffectiveDate.ToString('yyyy-MM-dd')
+            $arr = $info.ArrivalDate.ToString('yyyy-MM-dd')
+            Write-Host ($Strings.Convert_RetentionAnomalyItem -f $info.RelativePath, $eff, $arr, $info.EffectiveSource)
         }
-        $userInput = Read-Host ($Strings.Convert_RetentionPrompt -f $RetentionDays)
+        if ($suspiciousInfos.Count -gt $toShow.Count) {
+            Write-Host ($Strings.Convert_RetentionAnomalyMore -f ($suspiciousInfos.Count - $toShow.Count))
+        }
+    }
+
+    if (($Mode -eq 'prompt') -or $forcePrompt) {
+        if ($Mode -eq 'prompt') {
+            foreach ($info in $candidateInfos) {
+                Write-Host ("  - {0}" -f $info.RelativePath)
+            }
+        }
+        $promptText = if ($forcePrompt) { $Strings.Convert_RetentionAnomalyPrompt } else { ($Strings.Convert_RetentionPrompt -f $RetentionDays) }
+        $userInput = Read-Host $promptText
         if ($userInput.Trim().ToLowerInvariant() -notmatch '^(y|д|yes|да)$') {
             Write-Host $Strings.Convert_RetentionSkipped
+            if ($forcePrompt) {
+                $todayPrefix = (Get-Date).ToString('yyMMdd')
+                $candidateFolders = @()
+                foreach ($info in $suspiciousInfos) {
+                    $rp = ($info.RelativePath -as [string])
+                    if (-not $rp) { continue }
+                    $trimmed = $rp.TrimStart('\', '/')
+                    if (-not $trimmed) { continue }
+                    $seg = ($trimmed -split '[\\/]', 2)[0]
+                    if ($seg) { $candidateFolders += $seg }
+                }
+
+                $candidateFolders = @($candidateFolders | Sort-Object -Unique | Where-Object {
+                    $path = Join-Path -Path $resolvedRoot -ChildPath $_
+                    Test-Path -LiteralPath $path -PathType Container
+                })
+
+                if ($candidateFolders.Count -gt 0) {
+                    Write-Host $Strings.Convert_RetentionRenameCandidates
+                    foreach ($folder in $candidateFolders) { Write-Host ("  - {0}" -f $folder) }
+                    $renameInput = Read-Host ($Strings.Convert_RetentionRenamePrompt -f $todayPrefix)
+                    if ($renameInput.Trim().ToLowerInvariant() -match '^(y|д|yes|да)$') {
+                        $renamed = 0
+                        foreach ($folder in $candidateFolders) {
+                            $src = Join-Path -Path $resolvedRoot -ChildPath $folder
+                            $baseNew = "{0}_{1}" -f $todayPrefix, $folder
+                            $newName = $baseNew
+                            $suffix = 1
+                            while (Test-Path -LiteralPath (Join-Path -Path $resolvedRoot -ChildPath $newName)) {
+                                $newName = "{0}_{1}" -f $baseNew, $suffix
+                                $suffix++
+                            }
+                            try {
+                                Rename-Item -LiteralPath $src -NewName $newName -ErrorAction Stop
+                                $renamed++
+                                Write-Host ($Strings.Convert_RetentionRenameItem -f $folder, $newName)
+                            } catch {
+                                Write-Warning ("Failed to rename '{0}': {1}" -f $src, $_.Exception.Message)
+                            }
+                        }
+                        Write-Host ($Strings.Convert_RetentionRenameDone -f $renamed)
+                    }
+                }
+            }
             return
         }
     }
 
     Write-Host $Strings.Convert_RetentionDeleting
     $deletedCount = 0
-    foreach ($file in $candidateFiles) {
+    foreach ($info in $candidateInfos) {
+        $file = $info.File
         try {
-            Remove-Item -LiteralPath $file.FullName -Force
+            Remove-ItemSafe -LiteralPath $file.FullName -Force -UseRecycleBin:$deleteToRecycleBin
             $deletedCount++
         } catch {
             Write-Warning ("Failed to delete '{0}': {1}" -f $file.FullName, $_.Exception.Message)
@@ -763,7 +881,7 @@ function Remove-OldArchiveFiles {
     foreach ($dir in $directories) {
         if ($null -eq (Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
             try {
-                Remove-Item -LiteralPath $dir.FullName -Force
+                Remove-ItemSafe -LiteralPath $dir.FullName -Force -UseRecycleBin:$deleteToRecycleBin
                 Write-Host ($Strings.Convert_RetentionDirClean -f $dir.FullName)
             } catch {
                 Write-Warning ("Failed to remove directory '{0}': {1}" -f $dir.FullName, $_.Exception.Message)
