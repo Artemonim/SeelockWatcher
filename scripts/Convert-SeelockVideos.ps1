@@ -298,7 +298,7 @@ function Get-BestFfmpegVideoCodec {
             Encoder     = 'hevc_nvenc'
             DecoderArgs = @(Get-DecoderArg -CodecName 'hevc' -VendorDecoder 'hevc_cuvid')
             EncoderArgs = @(
-                '-c:v', 'hevc_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr_hq', '-cq', '30',
+                '-c:v', 'hevc_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr_hq', '-cq', '30',
                 '-spatial_aq', '1', '-temporal_aq', '1', '-aq-strength', '8', '-rc-lookahead', '32',
                 '-refs', '4', '-bf', '4', '-b_ref_mode', 'middle'
             )
@@ -308,7 +308,7 @@ function Get-BestFfmpegVideoCodec {
         return @{
             Encoder     = 'hevc_amf'
             DecoderArgs = @()
-            EncoderArgs = @('-c:v', 'hevc_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '30', '-qp_p', '30', '-bf', '4')
+            EncoderArgs = @('-c:v', 'hevc_amf', '-quality', 'balanced', '-rc', 'cqp', '-qp_i', '30', '-qp_p', '30', '-bf', '4')
         }
     }
     if ($allEncoders -match 'hevc_qsv') {
@@ -316,7 +316,7 @@ function Get-BestFfmpegVideoCodec {
             Encoder     = 'hevc_qsv'
             DecoderArgs = @(Get-DecoderArg -CodecName 'hevc' -VendorDecoder 'hevc_qsv')
             EncoderArgs = @(
-                '-c:v', 'hevc_qsv', '-preset', 'slow', '-cq', '30', '-look_ahead', '1', '-look_ahead_depth', '32'
+                '-c:v', 'hevc_qsv', '-preset', 'medium', '-cq', '30', '-look_ahead', '1', '-look_ahead_depth', '32'
             )
         }
     }
@@ -330,7 +330,7 @@ function Get-BestFfmpegVideoCodec {
             Encoder     = 'h264_nvenc'
             DecoderArgs = @(Get-DecoderArg -CodecName 'h264' -VendorDecoder 'h264_cuvid')
             EncoderArgs = @(
-                '-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-rc', 'vbr_hq', '-cq', '30',
+                '-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr_hq', '-cq', '30',
                 '-spatial_aq', '1', '-temporal_aq', '1', '-aq-strength', '8', '-rc-lookahead', '32',
                 '-refs', '4', '-bf', '2'
             )
@@ -340,7 +340,7 @@ function Get-BestFfmpegVideoCodec {
         return @{
             Encoder     = 'h264_amf'
             DecoderArgs = @()
-            EncoderArgs = @('-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '30', '-qp_p', '30', '-bf', '2')
+            EncoderArgs = @('-c:v', 'h264_amf', '-quality', 'balanced', '-rc', 'cqp', '-qp_i', '30', '-qp_p', '30', '-bf', '2')
         }
     }
     if ($allEncoders -match 'h264_qsv') {
@@ -348,7 +348,7 @@ function Get-BestFfmpegVideoCodec {
             Encoder     = 'h264_qsv'
             DecoderArgs = @(Get-DecoderArg -CodecName 'h264' -VendorDecoder 'h264_qsv')
             EncoderArgs = @(
-                '-c:v', 'h264_qsv', '-preset', 'slow', '-cq', '30', '-look_ahead', '1', '-look_ahead_depth', '32'
+                '-c:v', 'h264_qsv', '-preset', 'medium', '-cq', '30', '-look_ahead', '1', '-look_ahead_depth', '32'
             )
         }
     }
