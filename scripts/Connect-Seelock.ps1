@@ -58,6 +58,7 @@ if (-not $PSBoundParameters.ContainsKey('VerboseLog')) { $VerboseLog = $true }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:proc = $null
+$script:dateSynced = $false
 
 # * Global modal timeout used across all modal handlers (seconds)
 $Global:ModalTimeoutSec = 1
@@ -65,6 +66,14 @@ $Global:ModalTimeoutSec = 1
 function Write-Info {
 	param([string]$Message)
 	if ($VerboseLog) { Write-Host "[INFO] $Message" }
+}
+
+# * Machine-readable mount result. DateSynced is 1 only after the Date/Time button was clicked.
+function Write-DriveReady {
+	param([Parameter(Mandatory = $true)][string]$DriveLetter)
+	$flag = if ($script:dateSynced) { '1' } else { '0' }
+	Write-Output ("DateSynced={0}" -f $flag)
+	Write-Output ("DriveReady={0}" -f $DriveLetter)
 }
 
 function Throw-If([bool]$Condition, [string]$Message) {
@@ -476,7 +485,7 @@ try {
             if (-not $ForceReattach) {
                 $existing = Test-SeelockDrivePresent -Indicators $ExistingDriveIndicators
                 if ($existing) {
-                    Write-Output ("DriveReady={0}" -f $existing)
+                    Write-DriveReady -DriveLetter $existing
                     $operationSucceeded = $true
                     # Break the do-while loop
                     break
@@ -549,6 +558,7 @@ try {
             $dateTimeBtn = Find-DateTimeButtonAcrossWindows -ProcessId $proc.Id -TimeoutSec $UiTimeoutSec
             if ($dateTimeBtn) {
                 Invoke-ElementClick -Element $dateTimeBtn
+                $script:dateSynced = $true
                 Start-Sleep -Seconds $Global:ModalTimeoutSec
                 [void] (Wait-CloseSuccessLoginModal -ProcessId $proc.Id -TimeoutSec $Global:ModalTimeoutSec)
                 Invoke-FastOkSweep -ProcessId $proc.Id
@@ -578,7 +588,7 @@ try {
                 throw "No new drive detected within $DriveTimeoutSec seconds"
             }
 
-            Write-Output ("DriveReady={0}" -f $newDrive)
+            Write-DriveReady -DriveLetter $newDrive
             $operationSucceeded = $true
         }
         catch {

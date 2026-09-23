@@ -10,7 +10,10 @@ param(
     [string]$OutputDirectory,
 
     # ! If specified, the original video files will not be deleted after conversion.
-    [switch]$Preserve
+    [switch]$Preserve,
+
+    # * Set when this run already executed the device Date/Time sync step.
+    [switch]$DateSynced
 )
 
 #region Configuration Loading
@@ -677,7 +680,7 @@ function Convert-Videos {
     Write-Progress -Activity "Converting Videos" -Completed
 
     if ($retentionDays -gt 0) {
-        Remove-OldArchiveFiles -ArchiveRoot $OutputDirectory -RetentionDays $retentionDays -Mode $retentionMode
+        Remove-OldArchiveFiles -ArchiveRoot $OutputDirectory -RetentionDays $retentionDays -Mode $retentionMode -DateSynced:$DateSynced
     }
 }
 
@@ -738,12 +741,255 @@ function Get-ArchiveDateFromPath {
     return Get-ArchiveDateFromFolderName -FolderName $segments[0]
 }
 
+# * A stamp is a device clock reset when it is older than the file's arrival by more than RetentionDays.
+# * A short lag between the folder date and the archive timestamp stays a normal aged file.
+function Test-IsDeviceClockReset {
+    param(
+        [Parameter(Mandatory = $true)][datetime]$StampedDate,
+        [Parameter(Mandatory = $true)][datetime]$ArrivalDate,
+        [Parameter(Mandatory = $true)][int]$RetentionDays
+    )
+
+    $gapDays = ($ArrivalDate.Date - $StampedDate.Date).TotalDays
+    return ($gapDays -gt $RetentionDays)
+}
+
+# * Replaces the leading YYMMDD token of a Seelock archive folder, keeping the device suffix.
+function Get-SeelockFolderNameWithDate {
+    param(
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [Parameter(Mandatory = $true)][datetime]$FromDate,
+        [Parameter(Mandatory = $true)][datetime]$ToDate
+    )
+
+    $fromToken = $FromDate.ToString('yyMMdd')
+    $toToken = $ToDate.ToString('yyMMdd')
+    if ($FolderName -match '^(?<head>\d{6})(?<tail>.*)$' -and $Matches['head'] -eq $fromToken) {
+        return ($toToken + $Matches['tail'])
+    }
+    return $FolderName
+}
+
+# * Replaces YYYYMMDD inside a Seelock file name and keeps the original HHMMSS.
+function Get-SeelockFileNameWithDate {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][datetime]$FromDate,
+        [Parameter(Mandatory = $true)][datetime]$ToDate
+    )
+
+    $fromToken = $FromDate.ToString('yyyyMMdd')
+    $toToken = $ToDate.ToString('yyyyMMdd')
+    $pattern = '{0}(?<hms>\d{{6}})' -f [regex]::Escape($fromToken)
+    $match = [regex]::Match($FileName, $pattern)
+    if (-not $match.Success) { return $FileName }
+
+    $replacement = $toToken + $match.Groups['hms'].Value
+    return $FileName.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
+}
+
+# * Returns a sibling name that does not already exist under the parent.
+function Get-UniqueChildName {
+    param(
+        [Parameter(Mandatory = $true)][string]$ParentPath,
+        [Parameter(Mandatory = $true)][string]$DesiredName
+    )
+
+    $candidate = $DesiredName
+    $suffix = 1
+    while (Test-Path -LiteralPath (Join-Path -Path $ParentPath -ChildPath $candidate)) {
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($DesiredName)
+        $extension = [System.IO.Path]::GetExtension($DesiredName)
+        $candidate = '{0}_{1}{2}' -f $baseName, $suffix, $extension
+        $suffix++
+    }
+    return $candidate
+}
+
+# * Rewrites the date tokens in one archive folder and in the files inside it.
+function Rename-ArchiveFolderDate {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        [Parameter(Mandatory = $true)][string]$FolderName,
+        [Parameter(Mandatory = $true)][datetime]$NewDate
+    )
+
+    $result = [pscustomobject]@{
+        Folders    = 0
+        Files      = 0
+        FolderName = $FolderName
+    }
+
+    $sourcePath = Join-Path -Path $ArchiveRoot -ChildPath $FolderName
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+        Write-Warning ("Folder not found: {0}" -f $sourcePath)
+        return $result
+    }
+
+    $fromDate = Get-ArchiveDateFromFolderName -FolderName $FolderName
+    if (-not $fromDate) {
+        Write-Warning ("Folder name has no Seelock date: {0}" -f $FolderName)
+        return $result
+    }
+
+    $files = @(Get-ChildItem -LiteralPath $sourcePath -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        $newFileName = Get-SeelockFileNameWithDate -FileName $file.Name -FromDate $fromDate -ToDate $NewDate
+        if ($newFileName -eq $file.Name) { continue }
+
+        $uniqueName = $newFileName
+        $targetPath = Join-Path -Path $sourcePath -ChildPath $uniqueName
+        if (Test-Path -LiteralPath $targetPath) {
+            $uniqueName = Get-UniqueChildName -ParentPath $sourcePath -DesiredName $newFileName
+        }
+
+        try {
+            Rename-Item -LiteralPath $file.FullName -NewName $uniqueName -ErrorAction Stop
+            $result.Files++
+            Write-Host ($Strings.Convert_ClockResetRenamedFile -f $file.Name, $uniqueName)
+        } catch {
+            Write-Warning ("Failed to rename '{0}': {1}" -f $file.FullName, $_.Exception.Message)
+        }
+    }
+
+    $newFolderName = Get-SeelockFolderNameWithDate -FolderName $FolderName -FromDate $fromDate -ToDate $NewDate
+    if ($newFolderName -ne $FolderName) {
+        $uniqueFolder = $newFolderName
+        $destinationPath = Join-Path -Path $ArchiveRoot -ChildPath $uniqueFolder
+        if (Test-Path -LiteralPath $destinationPath) {
+            $uniqueFolder = Get-UniqueChildName -ParentPath $ArchiveRoot -DesiredName $newFolderName
+        }
+
+        try {
+            Rename-Item -LiteralPath $sourcePath -NewName $uniqueFolder -ErrorAction Stop
+            $result.Folders++
+            $result.FolderName = $uniqueFolder
+            Write-Host ($Strings.Convert_ClockResetRenamedFolder -f $FolderName, $uniqueFolder)
+        } catch {
+            Write-Warning ("Failed to rename '{0}': {1}" -f $sourcePath, $_.Exception.Message)
+        }
+    }
+
+    return $result
+}
+
+# * Returns the first path segment under the archive root.
+function Get-ArchiveTopFolderName {
+    param([string]$RelativePath)
+
+    if (-not $RelativePath) { return $null }
+    $trimmed = $RelativePath.TrimStart('\', '/')
+    if (-not $trimmed) { return $null }
+    $segment = ($trimmed -split '[\\/]', 2)[0]
+    if (-not $segment) { return $null }
+    return $segment
+}
+
+# * Asks whether to restamp, delete, or keep videos whose names come from a reset device clock.
+function Invoke-ClockResetChoice {
+    param(
+        [Parameter(Mandatory = $true)]$ResetInfos,
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        [Parameter(Mandatory = $true)][bool]$DateSynced
+    )
+
+    # * StrictMode rejects @(generic List). Copy by enumeration instead.
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($resetInfo in $ResetInfos) {
+        [void]$items.Add($resetInfo)
+    }
+    if ($DateSynced) {
+        Write-Host $Strings.Convert_ClockResetNoticeSynced
+    } else {
+        Write-Host $Strings.Convert_ClockResetNotice
+    }
+    Write-Host ($Strings.Convert_ClockResetCount -f $items.Count)
+
+    $toShow = @($items | Select-Object -First 30)
+    foreach ($info in $toShow) {
+        $effectiveText = $info.EffectiveDate.ToString('yyyy-MM-dd')
+        $arrivalText = $info.ArrivalDate.ToString('yyyy-MM-dd')
+        Write-Host ($Strings.Convert_RetentionAnomalyItem -f $info.RelativePath, $effectiveText, $arrivalText, $info.EffectiveSource)
+    }
+    if ($items.Count -gt $toShow.Count) {
+        Write-Host ($Strings.Convert_RetentionAnomalyMore -f ($items.Count - $toShow.Count))
+    }
+
+    $action = $null
+    while (-not $action) {
+        $userInput = Read-Host $Strings.Convert_ClockResetPrompt
+        $token = $userInput.Trim().ToLowerInvariant()
+        if (-not $token) { $action = 'skip' }
+        elseif ($token -match '^(t|т|1|today|поставить)$') { $action = 'today' }
+        elseif ($token -match '^(d|д|2|delete|удалить)$') { $action = 'delete' }
+        elseif ($token -match '^(s|п|3|n|skip|пропустить)$') { $action = 'skip' }
+        else { Write-Host $Strings.Convert_ClockResetInvalid }
+    }
+
+    if ($action -eq 'skip') {
+        Write-Host $Strings.Convert_ClockResetSkipped
+        return 0
+    }
+
+    if ($action -eq 'delete') {
+        $deletedCount = 0
+        foreach ($info in $items) {
+            try {
+                Remove-ItemSafe -LiteralPath $info.File.FullName -Force -UseRecycleBin:$deleteToRecycleBin
+                $deletedCount++
+            } catch {
+                Write-Warning ("Failed to delete '{0}': {1}" -f $info.File.FullName, $_.Exception.Message)
+            }
+        }
+        Write-Host ($Strings.Convert_ClockResetDeleted -f $deletedCount)
+        return $deletedCount
+    }
+
+    $folderNames = @()
+    foreach ($info in $items) {
+        $folderName = Get-ArchiveTopFolderName -RelativePath $info.RelativePath
+        if ($folderName) { $folderNames += $folderName }
+    }
+    $folderNames = @($folderNames | Sort-Object -Unique)
+
+    $newDate = Get-Date
+    $renamedFolders = 0
+    $renamedFiles = 0
+    foreach ($folderName in $folderNames) {
+        $renameResult = Rename-ArchiveFolderDate -ArchiveRoot $ArchiveRoot -FolderName $folderName -NewDate $newDate
+        $renamedFolders += $renameResult.Folders
+        $renamedFiles += $renameResult.Files
+    }
+    Write-Host ($Strings.Convert_ClockResetRenameDone -f $newDate.ToString('yyyy-MM-dd'), $renamedFolders, $renamedFiles)
+    return 0
+}
+
+# * Deletes empty directories left after retention cleanup, deepest paths first.
+function Remove-EmptyArchiveDirectories {
+    param([Parameter(Mandatory = $true)][string]$ArchiveRoot)
+
+    Write-Host $Strings.Convert_RetentionCleaning
+    $directories = Get-ChildItem -LiteralPath $ArchiveRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object -Property @{ Expression = { $_.FullName.Length }; Descending = $true }
+    foreach ($dir in $directories) {
+        if ($null -eq (Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            try {
+                Remove-ItemSafe -LiteralPath $dir.FullName -Force -UseRecycleBin:$deleteToRecycleBin
+                Write-Host ($Strings.Convert_RetentionDirClean -f $dir.FullName)
+            } catch {
+                Write-Warning ("Failed to remove directory '{0}': {1}" -f $dir.FullName, $_.Exception.Message)
+            }
+        }
+    }
+}
+
 # * Removes stale video files older than the retention threshold and prunes empty directories.
 function Remove-OldArchiveFiles {
     param(
         [Parameter(Mandatory = $true)][string]$ArchiveRoot,
         [Parameter(Mandatory = $true)][int]$RetentionDays,
-        [Parameter(Mandatory = $true)][string]$Mode
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [switch]$DateSynced
     )
 
     if (-not (Test-Path -LiteralPath $ArchiveRoot)) { return }
@@ -785,86 +1031,49 @@ function Remove-OldArchiveFiles {
         return
     }
 
-    $fileCount = $candidateInfos.Count
-    Write-Host ($Strings.Convert_RetentionFound -f $fileCount, $RetentionDays)
-
-    $suspiciousInfos = @($candidateInfos | Where-Object { $_.ArrivalDate -ge $cutoff })
-    $forcePrompt = ($suspiciousInfos.Count -gt 0)
-
-    if ($forcePrompt) {
-        Write-Warning ($Strings.Convert_RetentionAnomalyDetected -f $suspiciousInfos.Count, $fileCount, $cutoff.ToString('yyyy-MM-dd'))
-        $toShow = @($suspiciousInfos | Select-Object -First 30)
-        foreach ($info in $toShow) {
-            $eff = $info.EffectiveDate.ToString('yyyy-MM-dd')
-            $arr = $info.ArrivalDate.ToString('yyyy-MM-dd')
-            Write-Host ($Strings.Convert_RetentionAnomalyItem -f $info.RelativePath, $eff, $arr, $info.EffectiveSource)
+    # * Split ordinary aged files from stamps that are far older than the moment the file arrived.
+    $normalInfos = New-Object System.Collections.Generic.List[object]
+    $resetInfos = New-Object System.Collections.Generic.List[object]
+    foreach ($info in $candidateInfos) {
+        $isClockReset = $false
+        if ($info.FolderDate) {
+            $isClockReset = Test-IsDeviceClockReset -StampedDate $info.FolderDate -ArrivalDate $info.ArrivalDate -RetentionDays $RetentionDays
         }
-        if ($suspiciousInfos.Count -gt $toShow.Count) {
-            Write-Host ($Strings.Convert_RetentionAnomalyMore -f ($suspiciousInfos.Count - $toShow.Count))
+        if ($isClockReset) {
+            $resetInfos.Add($info)
+        } else {
+            $normalInfos.Add($info)
         }
     }
 
-    if (($Mode -eq 'prompt') -or $forcePrompt) {
-        if ($Mode -eq 'prompt') {
-            foreach ($info in $candidateInfos) {
-                Write-Host ("  - {0}" -f $info.RelativePath)
-            }
+    $deletedAny = $false
+    if ($resetInfos.Count -gt 0) {
+        $deletedReset = Invoke-ClockResetChoice -ResetInfos $resetInfos -ArchiveRoot $resolvedRoot -DateSynced $DateSynced.IsPresent
+        if ($deletedReset -gt 0) { $deletedAny = $true }
+    }
+
+    if ($normalInfos.Count -eq 0) {
+        if ($deletedAny) { Remove-EmptyArchiveDirectories -ArchiveRoot $resolvedRoot }
+        return
+    }
+
+    Write-Host ($Strings.Convert_RetentionFound -f $normalInfos.Count, $RetentionDays)
+
+    if ($Mode -eq 'prompt') {
+        foreach ($info in $normalInfos) {
+            Write-Host ("  - {0}" -f $info.RelativePath)
         }
-        $promptText = if ($forcePrompt) { $Strings.Convert_RetentionAnomalyPrompt } else { ($Strings.Convert_RetentionPrompt -f $RetentionDays) }
-        $userInput = Read-Host $promptText
+        $userInput = Read-Host ($Strings.Convert_RetentionPrompt -f $RetentionDays)
         if ($userInput.Trim().ToLowerInvariant() -notmatch '^(y|д|yes|да)$') {
             Write-Host $Strings.Convert_RetentionSkipped
-            if ($forcePrompt) {
-                $todayPrefix = (Get-Date).ToString('yyMMdd')
-                $candidateFolders = @()
-                foreach ($info in $suspiciousInfos) {
-                    $rp = ($info.RelativePath -as [string])
-                    if (-not $rp) { continue }
-                    $trimmed = $rp.TrimStart('\', '/')
-                    if (-not $trimmed) { continue }
-                    $seg = ($trimmed -split '[\\/]', 2)[0]
-                    if ($seg) { $candidateFolders += $seg }
-                }
-
-                $candidateFolders = @($candidateFolders | Sort-Object -Unique | Where-Object {
-                    $path = Join-Path -Path $resolvedRoot -ChildPath $_
-                    Test-Path -LiteralPath $path -PathType Container
-                })
-
-                if ($candidateFolders.Count -gt 0) {
-                    Write-Host $Strings.Convert_RetentionRenameCandidates
-                    foreach ($folder in $candidateFolders) { Write-Host ("  - {0}" -f $folder) }
-                    $renameInput = Read-Host ($Strings.Convert_RetentionRenamePrompt -f $todayPrefix)
-                    if ($renameInput.Trim().ToLowerInvariant() -match '^(y|д|yes|да)$') {
-                        $renamed = 0
-                        foreach ($folder in $candidateFolders) {
-                            $src = Join-Path -Path $resolvedRoot -ChildPath $folder
-                            $baseNew = "{0}_{1}" -f $todayPrefix, $folder
-                            $newName = $baseNew
-                            $suffix = 1
-                            while (Test-Path -LiteralPath (Join-Path -Path $resolvedRoot -ChildPath $newName)) {
-                                $newName = "{0}_{1}" -f $baseNew, $suffix
-                                $suffix++
-                            }
-                            try {
-                                Rename-Item -LiteralPath $src -NewName $newName -ErrorAction Stop
-                                $renamed++
-                                Write-Host ($Strings.Convert_RetentionRenameItem -f $folder, $newName)
-                            } catch {
-                                Write-Warning ("Failed to rename '{0}': {1}" -f $src, $_.Exception.Message)
-                            }
-                        }
-                        Write-Host ($Strings.Convert_RetentionRenameDone -f $renamed)
-                    }
-                }
-            }
+            if ($deletedAny) { Remove-EmptyArchiveDirectories -ArchiveRoot $resolvedRoot }
             return
         }
     }
 
     Write-Host $Strings.Convert_RetentionDeleting
     $deletedCount = 0
-    foreach ($info in $candidateInfos) {
+    foreach ($info in $normalInfos) {
         $file = $info.File
         try {
             Remove-ItemSafe -LiteralPath $file.FullName -Force -UseRecycleBin:$deleteToRecycleBin
@@ -875,21 +1084,12 @@ function Remove-OldArchiveFiles {
     }
     Write-Host ($Strings.Convert_RetentionDeleted -f $deletedCount)
 
-    Write-Host $Strings.Convert_RetentionCleaning
-    $directories = Get-ChildItem -LiteralPath $resolvedRoot -Directory -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object -Property @{ Expression = { $_.FullName.Length }; Descending = $true }
-    foreach ($dir in $directories) {
-        if ($null -eq (Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-            try {
-                Remove-ItemSafe -LiteralPath $dir.FullName -Force -UseRecycleBin:$deleteToRecycleBin
-                Write-Host ($Strings.Convert_RetentionDirClean -f $dir.FullName)
-            } catch {
-                Write-Warning ("Failed to remove directory '{0}': {1}" -f $dir.FullName, $_.Exception.Message)
-            }
-        }
+    if ($deletedCount -gt 0 -or $deletedAny) {
+        Remove-EmptyArchiveDirectories -ArchiveRoot $resolvedRoot
     }
 }
 
+function Invoke-SeelockVideoConversion {
 try {
     Test-FFmpegAvailable
     $overallTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -924,4 +1124,10 @@ try {
     # * Fallback: print generic error and exit non-zero.
     Write-Host ("[ERROR] {0}" -f $errMsg)
     exit 1
+}
+}
+
+# * Direct execution converts videos. Dot-sourcing only defines the functions.
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-SeelockVideoConversion
 }

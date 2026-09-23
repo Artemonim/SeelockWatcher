@@ -82,6 +82,7 @@ function Convert-SecureStringToPlainText {
 try {
     # --- Step 1: Detect existing mount or connect to the device ---
     $existingDrive = $null
+    $dateSynced = $false
     try {
         $fsDrives = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' }).Name | ForEach-Object { "{0}:" -f $_ }
         foreach ($d in $fsDrives) {
@@ -112,6 +113,10 @@ try {
             throw ($Strings.Sync_CannotGetDrive -f $connectInvoke.CombinedOutput)
         }
         $driveLetter = $driveMatch.Matches[0].Groups[1].Value
+        $syncedMatch = [regex]::Match([string]$connectInvoke.CombinedOutput, 'DateSynced=(?<flag>[01])')
+        if ($syncedMatch.Success -and $syncedMatch.Groups['flag'].Value -eq '1') {
+            $dateSynced = $true
+        }
         Write-Host ($Strings.Sync_MountSuccess -f $driveLetter)
     }
 
@@ -131,6 +136,7 @@ try {
     }
 
     if ($Preserve.IsPresent) { $convArgs += '-Preserve' }
+    if ($dateSynced) { $convArgs += '-DateSynced' }
     $convInvoke = Invoke-ExternalScript -ScriptPath $convertScriptPath -Arguments $convArgs
     if ($convInvoke.ExitCode -ne 0) { throw $Strings.Sync_ConversionFailed }
 
